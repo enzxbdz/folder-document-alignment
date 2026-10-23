@@ -1,82 +1,111 @@
-# Folder-Based Document Alignment Engine
+# Document Alignment App
 
-Batch-align phone-captured document images with classical computer vision. Select a folder of images, process the files together, review each file's outcome, and download the results as a ZIP.
+Batch-align phone photos of documents. Pick a folder (or upload a ZIP), start one job, watch per-file progress, then download a ZIP with the aligned images, untouched originals for anything uncertain, and a CSV audit report.
 
-## Features
+Scope follows the project plan "A Folder-Based Document Alignment Engine for Phone-Captured Documents Using Classical Computer Vision": OpenCV + NumPy only, mostly flat single-page JPG/JPEG/PNG photos, conditional perspective rectification, residual skew correction, non-destructive outputs, conservative review/failure outcomes. **Not included:** OCR, ML/DL, PDF input, semantic understanding, curved-page dewarping.
 
-- Batch processing of at least 50 supported image files in one job.
-- Folder selection in the browser, with ZIP upload as a fallback.
-- JPG, JPEG, and PNG input support.
-- Conditional page-boundary detection and perspective rectification for suitable flat pages.
-- Residual skew estimation and correction using classical computer-vision methods.
-- Non-destructive processing: source images are preserved.
-- Per-file outcomes: processed, review required, failed, or unsupported/skipped.
-- Downloadable ZIP containing aligned results, review items, and a CSV audit report.
+**Deployment status:** local demo. Jobs live in process memory, so a restart loses job state (orphaned files on disk are deleted at startup). Job IDs are unguessable (192-bit) but act as capability URLs; there are no user accounts. Do not expose this to an untrusted network as-is.
 
-The app aligns images; it does not perform OCR or create searchable PDFs. It is intended for mostly flat, single-page document photos. Curved pages, direct PDF processing, and semantic document understanding are outside the current scope.
-
-## Requirements
-
-- Python 3.11 or newer
-- A modern web browser
-
-## Run locally
-
-From the repository root, create and activate a virtual environment, install dependencies, and start the web app:
+## Run
 
 ```bash
-python -m venv .venv
-```
-
-Windows PowerShell:
-
-```powershell
-.venv\Scripts\Activate.ps1
+python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload
+python -m uvicorn app.main:app --port 8000
+# open http://localhost:8000
 ```
 
-macOS or Linux:
+Tests: `pip install -r requirements-dev.txt && python -m pytest -q`
+Synthetic sample images (clearly synthetic, git-ignored): `python -m scripts.make_synthetic_samples sample_data/synthetic 50`
 
-```bash
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload
+## Input
+
+* **Folder:** `<input webkitdirectory>`. The browser sends each image plus its relative path (`paths` field). Unsupported files are listed by path only (not uploaded). Chromium/Edge/Firefox/Safari support folder pickers; where unavailable the page hides it.
+* **ZIP fallback:** one `archive` upload. Entries are extracted by the server with per-entry and total byte budgets counted while streaming, a compression-ratio check, entry-count limit, and symlink/encrypted/junk (`__MACOSX`, `._*`, `.DS_Store`) skipping.
+* The page shows file count, supported and unsupported counts, and validation errors **after upload and before processing**; processing starts only when you press Start.
+* All names are untrusted: paths are normalized, `..`/absolute/drive paths are rejected (listed as `rejected-entry-N`), stored on disk under index-based names, and given collision-free case-insensitive output paths (`x.jpg`, `x__2.jpg`).
+
+## Output ZIP
+
+```
+aligned/<relative path>   corrected images (same extension; or an unchanged byte copy, see below)
+review/<relative path>    untouched originals for review_required and failed inputs
+audit.csv                 one row per input
+settings.json             estimator and every threshold used for the job
 ```
 
-Open the local address printed by Uvicorn in your browser. If your repository uses a different application module or run command, follow the command in its project configuration or update this section to match it.
+`audit.csv` columns: `source_path, status, output_path, output_kind, estimator, angle_deg, perspective_action, perspective_reason, correction_applied, elapsed_s, note, sha256_input`. Text cells are neutralized against spreadsheet formula injection.
 
-## Use the app
+## Status meanings
 
-1. Choose a folder containing document images, or select a ZIP file if folder selection is unavailable.
-2. Review the file counts and validation messages.
-3. Start the batch and follow the per-file progress and status list.
-4. When processing is complete, select **Download ZIP** to retrieve the results and audit report.
+| status | meaning |
+|---|---|
+| `processed` | a permitted correction path completed and an output was written. Not a quality guarantee. |
+| `review_required` | readable input, evidence ambiguous or insufficient; original kept in `review/`, never labelled corrected |
+| `failed` | supported input could not be decoded, processed or saved; original kept in `review/` when it could be safely copied |
+| `unsupported_skipped` | unsupported type, unsafe path, over per-file or pixel limit, hidden/system file |
 
-Inputs with uncertain page geometry are flagged for review instead of being presented as successfully corrected. Unsupported files and processing failures are listed in the audit report.
+`pending` and `running` appear only in the UI while a job is in progress.
 
-## Output contents
+**Already-aligned images:** if no perspective correction applies and |skew| < 0.3 deg, the output in `aligned/` is a byte-identical copy of the input, `correction_applied` is `none`, and the note says so. It is not presented as corrected.
 
-The downloaded archive contains the aligned images, a review folder for items that need manual attention, and `audit.csv`. The audit report records each input's status and relevant processing details. Review-required items are preserved as originals and are not labeled as corrected.
+## Pipeline (`app/services/image_alignment.py`)
 
-## Processing scope
+1. Validate magic bytes and header dimensions (decompression-bomb guard), then decode. EXIF orientation is applied by the OpenCV decoder.
+2. **Perspective:** Canny edges on a downscaled copy, external contours, convex hull, `approxPolyDP`. A candidate must be a convex quadrilateral covering 30-97% of the frame, interior angles 50-130 deg, plausible aspect ratio, and backed by detected edges; the edge map must not be noise-dense.
+   * `applied`: one clear candidate, warped with a perspective transform to an axis-aligned rectangle sized by the longer opposite sides.
+   * `skipped`: no four-corner outline, or the outline is the whole frame. Falls back to rotation only.
+   * `rejected`: candidates exist but fail checks, or two similar-size outlines compete. Result is `review_required` (conservative, not a rotation fallback).
+3. **Residual skew**, two estimators: `min_area_rect` (OpenCV `minAreaRect` over foreground pixels) and `projection_profile` (variance of row sums over rotation angles, 1 deg then 0.1 deg steps, with a peak-prominence check). A third mode, `consensus`, requires both to agree within 1 deg.
+   * Rejected: empty/near-empty content, no distinct foreground, flat profile, |angle| > 15 deg, estimator disagreement.
+   * If perspective was applied but skew is rejected, the perspective-only result is written and the note says residual skew was not corrected. If nothing usable exists, `review_required`.
+4. Rotation uses an enlarged canvas so nothing is cropped; the fill colour is the median of the image border. Output dimensions and encoding are validated.
 
-The alignment pipeline uses OpenCV and NumPy operations. It is designed for in-plane rotation and planar perspective distortion in mostly flat documents. It does not address curled or folded pages, OCR, PDF ingestion, reading order, or document content interpretation.
+**Sign convention:** `angle_deg > 0` means page content is rotated counter-clockwise (as viewed); the correction rotates clockwise by that amount.
 
-Processing results depend on image quality and visible page geometry. A successful output write does not guarantee that every correction is visually accurate; inspect review-required files and verify important results.
+**Provisional default:** the default estimator (`projection_profile`) was **not** chosen from development evidence on real photos. It is configurable per job in the UI, via `DOCALIGN_SKEW_METHOD`, and labelled provisional in the UI and `settings.json`. Replace the default once the evaluation supports a choice. All thresholds in `ProcessingConfig` are likewise untuned starting values.
 
-## Privacy and file handling
+## Limits and retention (defaults; env vars in `.env.example`)
 
-Uploaded files are processed by the application server. Temporary-file retention and cleanup behavior depend on the app configuration and deployment. Before using sensitive documents, review the deployment's storage and retention settings. Do not expose this development server publicly without adding appropriate authentication, access controls, and operational safeguards.
+| setting | default |
+|---|---|
+| supported images per job | 300 (must be at least 50) |
+| total upload / per file | 500 MB / 25 MB |
+| pixels per image | 60 million |
+| entries listed per job (incl. unsupported) | 2000 |
+| job duration | 1800 s (remaining files become `failed`, originals preserved) |
+| concurrent running jobs / stored jobs / workers | 1 / 10 / 2 |
+| retention | 30 min |
 
-## Development and verification
+The 50-image minimum is verified by tests. The 300 limit is a configured cap, **not a measured capacity**; no benchmark is claimed.
 
-Run the checks included in the repository using the commands documented by the project. Include the observed test results in project reports; do not infer real-photo accuracy from successful synthetic tests alone.
+Memory: at most `workers x 2` images are in flight, each decoded once and released. Starlette spools multipart uploads to temporary files before the app reads them, so uploads are bounded by the request-size checks, not streamed end-to-end.
 
-## Project status
+Retention: uploaded inputs and working files are deleted as soon as the ZIP is built. The ZIP is deleted `retention` minutes after the job finishes (staged jobs: after upload). A background sweeper runs every 30 s. Do not describe this as "fully private" or "offline"; images are processed on the server you run.
 
-This is a student project exploring a focused, folder-oriented batch alignment workflow with auditable per-file outcomes. Its performance should be described only on the datasets and conditions actually evaluated. It is not a claim of superiority over CamScanner or other document-scanning applications.
+## API
 
-## License
+`GET /api/config`, `POST /api/jobs` (multipart: `files`+`paths`[+`skipped`] or `archive`), `POST /api/jobs/{id}/start` (`{"skew_method": ...}` optional), `GET /api/jobs/{id}`, `GET /api/jobs/{id}/download` (409 until completed), `DELETE /api/jobs/{id}`.
 
-No license is specified yet. Add a license file and update this section if you choose to publish the project under a particular license.
+## Layout
+
+```
+app/main.py              routes, security headers
+app/config.py            limits, retention, ProcessingConfig
+app/models.py            Status, JobState, FileResult, Job
+app/services/image_alignment.py   pure CV pipeline (no HTTP/filesystem)
+app/services/batch_jobs.py        job lifecycle, bounded pool, retention sweep
+app/services/archive.py           path sanitizing, safe staging/extraction, output ZIP, audit CSV
+scripts/make_synthetic_samples.py synthetic test pages with known transforms
+tests/                            alignment, archive and API tests
+```
+
+## Verification scope
+
+Automated checks use **synthetic** images (generated text-like bars, known rotations, a synthetic perspective "desk" scene). They verify implementation behaviour (sign convention, corner ordering, safety, reconciliation). They say nothing about accuracy on real phone photos; that needs a labelled real-photo evaluation, which is still future work.
+
+## Implemented vs future work
+
+Implemented: folder + ZIP intake, 50+ image batches, perspective with deterministic checks, two skew estimators + consensus, review/failed handling, audit CSV, retention, safe paths/ZIPs, per-job isolation.
+
+Future work: real-photo evaluation and estimator selection, threshold tuning, comparison with other scanners (no superiority claim is made), persistent job store/queue and authentication for any multi-user deployment, cancel button, curved-page handling.
