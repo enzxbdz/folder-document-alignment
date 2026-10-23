@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Straighten a folder of document photos</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header class="masthead">
+  <svg class="sheet" viewBox="0 0 80 100" aria-hidden="true" focusable="false">
+    <rect x="6" y="4" width="68" height="92" rx="2" class="sheet-page"/>
+    <g class="sheet-lines"><line x1="16" y1="22" x2="64" y2="22"/><line x1="16" y1="34" x2="58" y2="34"/><line x1="16" y1="46" x2="64" y2="46"/><line x1="16" y1="58" x2="52" y2="58"/><line x1="16" y1="70" x2="62" y2="70"/></g>
+  </svg>
+  <div>
+    <h1>Straighten a folder of document photos</h1>
+    <p class="lede">Choose a folder of phone photos of pages. The server straightens each one and returns a ZIP with the results and a per-file audit report.</p>
+  </div>
+</header>
+
+<main>
+  <section aria-labelledby="about-h" class="panel">
+    <h2 id="about-h">Before you start</h2>
+    <ul class="plain">
+      <li><strong>Accepted:</strong> JPG, JPEG and PNG photos of mostly flat, single pages. Other files are listed in the report and skipped.</li>
+      <li><strong>Batch size:</strong> up to {{ cfg.max_files }} images per job. The app is built and tested for at least 50 images in one job; larger batches are allowed up to this limit but have not been benchmarked.</li>
+      <li><strong>Other limits:</strong> {{ max_total }} in total, {{ max_file }} per file, {{ max_mp }} megapixels per image.</li>
+      <li><strong>What it does:</strong> it aligns images (perspective and small rotation, using classical computer vision). It does not read text, run OCR or make searchable PDFs, and it does not flatten curved pages.</li>
+      <li><strong>Your originals are never changed.</strong> Photos the app is unsure about are put in a <code>review</code> folder untouched, never labelled as corrected.</li>
+      <li><strong>Retention:</strong> uploads and working files are deleted as soon as the ZIP is built. The ZIP is deleted {{ cfg.retention_minutes }} minutes after the job finishes (or after upload if you never start it). Job records are held in memory, so a server restart discards them.</li>
+      <li><strong>Where it runs:</strong> this is a local demo server. It is not a hardened multi-user service.</li>
+    </ul>
+  </section>
+
+  <section aria-labelledby="choose-h" class="panel" id="step-choose">
+    <h2 id="choose-h">1. Choose your photos</h2>
+    <div class="choosers">
+      <div id="folder-wrap">
+        <label for="folder-input">Folder</label>
+        <input id="folder-input" type="file" webkitdirectory multiple>
+      </div>
+      <div>
+        <label for="zip-input">ZIP file (if your browser cannot pick folders)</label>
+        <input id="zip-input" type="file" accept=".zip,application/zip">
+      </div>
+    </div>
+    <p id="folder-unsupported" class="note" hidden>This browser cannot select folders. Use the ZIP option.</p>
+    <div id="upload-progress" hidden>
+      <label for="upload-bar">Uploading</label>
+      <progress id="upload-bar" max="100" value="0"></progress>
+    </div>
+    <p id="choose-error" class="error" role="alert" hidden></p>
+  </section>
+
+  <section aria-labelledby="check-h" class="panel" id="step-check" hidden>
+    <h2 id="check-h">2. Check and start</h2>
+    <p>Selected: <strong id="sel-name"></strong></p>
+    <dl class="counts" id="sel-counts"></dl>
+    <p id="sel-warn" class="note" hidden></p>
+    <div class="row">
+      <div>
+        <label for="skew-method">Skew estimator</label>
+        <select id="skew-method"></select>
+        <p class="hint" id="skew-hint"></p>
+      </div>
+    </div>
+    <div class="row">
+      <button id="start-btn" type="button" class="primary">Start processing</button>
+      <button id="cancel-btn" type="button" class="quiet">Choose different photos</button>
+    </div>
+    <p id="start-error" class="error" role="alert" hidden></p>
+  </section>
+
+  <section aria-labelledby="run-h" class="panel" id="step-run" hidden>
+    <h2 id="run-h">3. Progress</h2>
+    <p id="run-summary" aria-live="polite"></p>
+    <progress id="run-bar" max="100" value="0" aria-label="Processing progress"></progress>
+    <div class="table-wrap">
+      <table>
+        <caption class="sr-only">Per-file status</caption>
+        <thead><tr><th scope="col">File</th><th scope="col">Status</th><th scope="col">Detail</th></tr></thead>
+        <tbody id="file-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-labelledby="done-h" class="panel" id="step-done" hidden>
+    <h2 id="done-h">4. Results</h2>
+    <dl class="counts" id="final-counts"></dl>
+    <p id="final-note" class="note"></p>
+    <div class="row">
+      <a id="download-link" class="button primary" href="#" hidden>Download ZIP</a>
+      <button id="new-btn" type="button" class="quiet">Start a new batch</button>
+    </div>
+    <p class="hint">The ZIP holds <code>aligned/</code>, <code>review/</code>, <code>audit.csv</code> and <code>settings.json</code>. A file listed as processed has had a permitted correction written; that does not guarantee a perfect result, so check the images.</p>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
